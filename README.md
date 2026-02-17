@@ -42,3 +42,9 @@ results/
     test_results.png
     analysis.png
 ```
+
+## Example
+
+Analysis pipeline output showing all stages of etch detection:
+
+![Analysis Example](img/analysis_example.png)
