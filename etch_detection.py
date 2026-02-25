@@ -51,7 +51,9 @@ def detect_etchings(image_path: Path, brightness_percentile: float, circularity_
     cv2.drawContours(img_brightness_filter, contours_bright, -1, (0, 255, 0), 2)
 
     img_roundness_filter = cv2.cvtColor(binary_brightness, cv2.COLOR_GRAY2BGR)
-    cv2.drawContours(img_roundness_filter, contours_bright, -1, (255, 0, 0), 2)
+    # draw all bright contours in red so they are visible on dark background
+    cv2.drawContours(img_roundness_filter, contours_bright, -1, (0, 0, 255), 2)
+    # overlay circular detections in green
     for etch in circular_etchings:
         cv2.drawContours(img_roundness_filter, [etch["contour"]], -1, (0, 255, 0), 2)
 
