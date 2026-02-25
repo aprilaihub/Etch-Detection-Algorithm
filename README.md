@@ -35,12 +35,19 @@ python etch_detection.py --input Optical_Imaging_1T1R_Arrays_VIA_etch --brightne
 
 ## Output
 
+Each image processed will have its own directory under `results/`.  The folder now contains a set of images showing every stage of the pipeline plus the composite report.
+
 ```
 results/
   <image_name>/
-    original.png
-    test_results.png
-    analysis.png
+    original.png            # color input
+    grayscale.png           # converted to gray
+    hist_brightness.png      # brightness distribution with threshold
+    brightness_filter.png    # binary mask after brightness filter
+    hist_roundness.png       # circularity distribution with threshold
+    roundness_filter.png     # contours after roundness filtering
+    test_results.png         # detections drawn on original
+    analysis.png             # full analysis figure (no success rate shown)
 ```
 
 ## Example

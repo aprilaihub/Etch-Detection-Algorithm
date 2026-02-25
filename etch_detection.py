@@ -17,16 +17,19 @@ def load_image(image_path: Path):
 def detect_etchings(image_path: Path, brightness_percentile: float, circularity_threshold: float):
     img, gray = load_image(image_path)
 
+    # brightness threshold determination
     hist = cv2.calcHist([gray], [0], None, [256], [0, 256]).flatten()
     cdf = np.cumsum(hist) / np.sum(hist)
     threshold_idx = np.searchsorted(cdf, brightness_percentile)
     brightness_threshold = int(threshold_idx)
 
+    # apply brightness threshold and find contours
     binary_brightness = cv2.threshold(gray, brightness_threshold, 255, cv2.THRESH_BINARY)[1]
     contours_bright, _ = cv2.findContours(
         binary_brightness, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
     )
 
+    # compute circularity values for all bright contours
     circular_etchings = []
     circularity_values = []
     for cnt in contours_bright:
@@ -43,6 +46,15 @@ def detect_etchings(image_path: Path, brightness_percentile: float, circularity_
                 "area": area,
             })
 
+    # also build filter images that will be useful later
+    img_brightness_filter = cv2.cvtColor(binary_brightness, cv2.COLOR_GRAY2BGR)
+    cv2.drawContours(img_brightness_filter, contours_bright, -1, (0, 255, 0), 2)
+
+    img_roundness_filter = cv2.cvtColor(binary_brightness, cv2.COLOR_GRAY2BGR)
+    cv2.drawContours(img_roundness_filter, contours_bright, -1, (255, 0, 0), 2)
+    for etch in circular_etchings:
+        cv2.drawContours(img_roundness_filter, [etch["contour"]], -1, (0, 255, 0), 2)
+
     return {
         "image_path": image_path,
         "img": img,
@@ -56,11 +68,22 @@ def detect_etchings(image_path: Path, brightness_percentile: float, circularity_
         "circularity_values": circularity_values,
         "circularity_threshold": circularity_threshold,
         "brightness_percentile": brightness_percentile,
+        "img_brightness_filter": img_brightness_filter,
+        "img_roundness_filter": img_roundness_filter,
     }
 
 
-def create_test_results_image(image_path: Path, brightness_percentile: float, circularity_threshold: float):
-    data = detect_etchings(image_path, brightness_percentile, circularity_threshold)
+def create_test_results_image(image_path: Path = None, brightness_percentile: float = None, circularity_threshold: float = None, data: dict = None):
+    """Return an image with circles drawn at detected etchings and the data dict.
+
+    Either ``data`` may be provided directly (preferred when already computed),
+    or ``image_path`` along with the thresholds are required and ``data`` will
+    be computed internally.
+    """
+    if data is None:
+        if image_path is None:
+            raise ValueError("Either data or image_path must be supplied")
+        data = detect_etchings(image_path, brightness_percentile, circularity_threshold)
     img_results = data["img"].copy()
 
     for etch in data["circular_etchings"]:
@@ -73,7 +96,17 @@ def create_test_results_image(image_path: Path, brightness_percentile: float, ci
     return img_results, data
 
 
-def create_analysis_report_image(data):
+def create_analysis_report_image(data, show_success_rate: bool = True):
+    """Build a composite figure summarizing the detection pipeline.
+
+    Parameters
+    ----------
+    data : dict
+        The dictionary returned by :func:`detect_etchings`.
+    show_success_rate : bool
+        If False, the "Success Rate" line is omitted from the DETECTION SUMMARY
+        text (used when generating the final analysis image requested by the user).
+    """
     fig, axes = plt.subplots(2, 5, figsize=(20, 8))
 
     axes[0, 0].imshow(cv2.cvtColor(data["img"], cv2.COLOR_BGR2RGB))
@@ -142,19 +175,22 @@ def create_analysis_report_image(data):
     total_circular = len(data["circular_etchings"])
     pass_rate = (total_circular / total_contours * 100) if total_contours else 0.0
 
-    summary_text = (
-        "DETECTION SUMMARY\n\n"
-        f"Total Detections: {total_circular}\n\n"
-        "Brightness Filter:\n"
-        f"  Threshold: {data['brightness_threshold']}\n"
-        f"  Regions found: {total_contours}\n\n"
-        "Roundness Filter:\n"
-        f"  Threshold: {data['circularity_threshold']}\n"
-        f"  Passed: {total_circular}\n"
-        f"  Rejected: {total_contours - total_circular}\n\n"
-        "Success Rate:\n"
-        f"  {pass_rate:.1f}% pass filters\n"
-    )
+    # build summary text; optionally omit success rate
+    summary_text = [
+        "DETECTION SUMMARY\n\n",
+        f"Total Detections: {total_circular}\n\n",
+        "Brightness Filter:\n",
+        f"  Threshold: {data['brightness_threshold']}\n",
+        f"  Regions found: {total_contours}\n\n",
+        "Roundness Filter:\n",
+        f"  Threshold: {data['circularity_threshold']}\n",
+        f"  Passed: {total_circular}\n",
+        f"  Rejected: {total_contours - total_circular}\n\n",
+    ]
+    if show_success_rate:
+        summary_text.append("Success Rate:\n")
+        summary_text.append(f"  {pass_rate:.1f}% pass filters\n")
+    summary_text = "".join(summary_text)
 
     axes[1, 4].axis("off")
     axes[1, 4].text(
@@ -172,27 +208,85 @@ def create_analysis_report_image(data):
 
 
 def process_image(image_path: Path, output_dir: Path, brightness_percentile: float, circularity_threshold: float):
+    """Run the full pipeline for a single image and write out all intermediate files.
+
+    The output directory is created if necessary. The following files are
+    produced:
+
+      * original.png                (original color image)
+      * grayscale.png               (grayscale conversion)
+      * hist_brightness.png         (gray histogram with threshold line)
+      * brightness_filter.png       (binary brightness filter with contours)
+      * hist_roundness.png          (circularity histogram with threshold)
+      * roundness_filter.png        (same filter image annotated with passed etchings)
+      * test_results.png            (original image annotated with detection circles)
+      * analysis.png                (composite report without success rate line)
+
+    """
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    img_results, data = create_test_results_image(
-        image_path, brightness_percentile, circularity_threshold
+    # perform detection once
+    data = detect_etchings(image_path, brightness_percentile, circularity_threshold)
+    img_results, _ = create_test_results_image(data=data)
+
+    # save basic images
+    cv2.imwrite(str(output_dir / "original.png"), data["img"])
+    cv2.imwrite(str(output_dir / "grayscale.png"), data["gray"])
+
+    # brightness filter image created earlier in detect_etchings
+    cv2.imwrite(str(output_dir / "brightness_filter.png"), data["img_brightness_filter"])
+
+    # roundness filter
+    cv2.imwrite(str(output_dir / "roundness_filter.png"), data["img_roundness_filter"])
+
+    # test results
+    cv2.imwrite(str(output_dir / "test_results.png"), img_results)
+
+    # histograms using matplotlib
+    # brightness histogram
+    fig, ax = plt.subplots()
+    ax.hist(data["gray"].flatten(), bins=256, alpha=0.8, color="skyblue")
+    ax.axvline(
+        x=data["brightness_threshold"],
+        color="red", linestyle="--", linewidth=2,
+        label=f"Threshold = {data['brightness_threshold']}"
     )
+    ax.set_title("Brightness percentile threshold")
+    ax.set_xlabel("Pixel Brightness Value")
+    ax.set_ylabel("Frequency")
+    ax.legend()
+    fig.savefig(str(output_dir / "hist_brightness.png"), dpi=150)
+    plt.close(fig)
 
-    original_out = output_dir / "original.png"
-    results_out = output_dir / "test_results.png"
-    analysis_out = output_dir / "analysis.png"
+    # roundness histogram
+    fig, ax = plt.subplots()
+    ax.hist(data["circularity_values"], bins=30, alpha=0.8, color="orange")
+    ax.axvline(
+        x=data["circularity_threshold"],
+        color="red", linestyle="--", linewidth=2,
+        label=f"Threshold = {data['circularity_threshold']}"
+    )
+    ax.set_title("Roundness threshold")
+    ax.set_xlabel("Circularity (0=line, 1=circle)")
+    ax.set_ylabel("Frequency")
+    ax.legend()
+    fig.savefig(str(output_dir / "hist_roundness.png"), dpi=150)
+    plt.close(fig)
 
-    cv2.imwrite(str(original_out), data["img"])
-    cv2.imwrite(str(results_out), img_results)
-
-    fig = create_analysis_report_image(data)
-    fig.savefig(str(analysis_out), dpi=200)
+    # full analysis composite without success rate
+    fig = create_analysis_report_image(data, show_success_rate=False)
+    fig.savefig(str(output_dir / "analysis.png"), dpi=200)
     plt.close(fig)
 
     return {
-        "original": original_out,
-        "test_results": results_out,
-        "analysis": analysis_out,
+        "original": output_dir / "original.png",
+        "grayscale": output_dir / "grayscale.png",
+        "hist_brightness": output_dir / "hist_brightness.png",
+        "brightness_filter": output_dir / "brightness_filter.png",
+        "hist_roundness": output_dir / "hist_roundness.png",
+        "roundness_filter": output_dir / "roundness_filter.png",
+        "test_results": output_dir / "test_results.png",
+        "analysis": output_dir / "analysis.png",
     }
 
 
